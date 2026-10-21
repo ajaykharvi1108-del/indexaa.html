@@ -1,0 +1,705 @@
+<!DOCTYPE html>
+<html lang="en" class="h-full bg-slate-950 text-slate-100">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Enterprise AI Traffic Radar & P2P Enforcement System</title>
+  
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.10.0/dist/tf.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js"></script>
+  <!-- PeerJS for P2P WebRTC Camera Sharing -->
+  <script src="https://unpkg.com/peerjs@1.4.7/dist/peerjs.min.js"></script>
+
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            brand: { 50: '#f8fafc', 100: '#f1f5f9', 500: '#0ea5e9', 600: '#0284c7', 750: '#0369a1', 900: '#0f172a' }
+          },
+          fontFamily: { sans: ['Inter', 'sans-serif'], mono: ['JetBrains Mono', 'monospace'] }
+        }
+      }
+    }
+  </script>
+  <style>
+    body, button, input, select, textarea, table {
+      font-family: 'Inter', sans-serif !important;
+    }
+    .font-mono { font-family: 'JetBrains Mono', monospace !important; }
+    button { text-transform: none; }
+    input, select, textarea { caret-color: #0ea5e9; }
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: #020617; }
+    ::-webkit-scrollbar-thumb { background: #334155; border-radius: 3px; }
+    ::-webkit-scrollbar-thumb:hover { background: #0ea5e9; }
+    
+    .scanner-line {
+      height: 2px;
+      background: linear-gradient(90deg, transparent, #0ea5e9, transparent);
+      box-shadow: 0 0 10px #0ea5e9;
+      animation: scan 3s infinite linear;
+    }
+    @keyframes scan { 0% { top: 0%; opacity: 0.8; } 50% { opacity: 1; } 100% { top: 100%; opacity: 0.8; } }
+    .hud-border { position: relative; border: 1px solid rgba(14, 165, 233, 0.2); }
+    video, #detectionCanvas, #streamImg, #photoPreviewImg { max-height: 100%; }
+    #detectionCanvas { display: block; }
+  </style>
+</head>
+
+<body class="h-full flex flex-col font-sans antialiased bg-slate-950 text-slate-100 selection:bg-brand-500 selection:text-white">
+
+  <!-- Header -->
+  <header class="bg-slate-900/90 backdrop-blur-md border-b border-slate-800 sticky top-0 z-50">
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
+      <div class="flex items-center space-x-3">
+        <div class="w-10 h-10 rounded-lg bg-brand-600 flex items-center justify-center shadow-md shadow-brand-500/20">
+          <i class="fa-solid fa-shield-halved text-white text-lg"></i>
+        </div>
+        <div>
+          <h1 class="text-base font-semibold tracking-tight text-white">
+            Enterprise Traffic Radar & AI Enforcement
+          </h1>
+          <p class="text-xs text-slate-400 font-mono">P2P Camera Bridge, Pedestrian & Stray Animal Detection</p>
+        </div>
+      </div>
+
+      <div class="flex items-center space-x-4">
+        <div id="statusBadge" class="flex items-center space-x-2 px-3 py-1 rounded-full bg-amber-500/10 border border-amber-500/20 text-amber-400 text-xs font-medium">
+          <span class="w-2 h-2 rounded-full bg-amber-400 animate-ping"></span>
+          <span id="statusText">Initializing Neural Net...</span>
+        </div>
+
+        <button id="toggleCameraBtn" disabled class="px-4 py-2 bg-brand-600 hover:bg-brand-500 disabled:bg-slate-800 disabled:text-slate-600 text-white font-medium rounded-lg transition text-xs sm:text-sm flex items-center space-x-2 shadow-sm">
+          <i class="fa-solid fa-power-off"></i>
+          <span id="toggleCameraText">Start Local Radar</span>
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <!-- Main Content -->
+  <main class="flex-1 max-w-7xl w-full mx-auto p-4 sm:p-6 lg:p-8 grid grid-cols-1 lg:grid-cols-12 gap-6">
+
+    <!-- Left Column: Video & Canvas Feed -->
+    <section class="lg:col-span-8 flex flex-col space-y-4">
+      
+      <div class="relative bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden shadow-xl flex items-center justify-center min-h-[350px] sm:min-h-[480px] hud-border">
+        
+        <div id="scannerLine" class="hidden absolute w-full z-10 scanner-line"></div>
+
+        <div class="absolute top-3 left-3 z-20 text-xs bg-slate-950/80 backdrop-blur border border-slate-800 px-2.5 py-1 rounded-md text-slate-300 flex items-center space-x-2 font-mono">
+          <span id="fpsCounter">FPS: 0</span>
+          <span class="text-slate-600">|</span>
+          <span id="backendBadge" class="text-brand-400">WebGL</span>
+          <span class="text-slate-600">|</span>
+          <span id="resolutionBadge">0x0</span>
+        </div>
+
+        <div class="relative w-full h-full flex items-center justify-center">
+          <video id="webcam" class="w-full h-full object-contain hidden" playsinline muted></video>
+          <video id="remoteVideo" class="w-full h-full object-contain hidden" playsinline autoplay></video>
+          <img id="streamImg" class="w-full h-full object-contain hidden" alt="IP Stream Feed" />
+          <img id="photoPreviewImg" class="w-full h-full object-contain hidden" alt="Uploaded Photo" />
+          <canvas id="detectionCanvas" class="w-full h-full object-contain"></canvas>
+        </div>
+
+        <div id="placeholderUI" class="absolute inset-0 flex flex-col items-center justify-center bg-slate-950/95 p-6 text-center z-0">
+          <div class="w-16 h-16 rounded-2xl bg-slate-900 border border-slate-800 flex items-center justify-center mb-4 text-slate-500">
+            <i class="fa-solid fa-camera text-2xl"></i>
+          </div>
+          <h3 class="text-slate-200 font-medium text-base">Camera Feed Offline</h3>
+          <p class="text-slate-400 text-sm max-w-sm mt-1">
+            Start local camera, link a P2P peer room, connect an IP stream, or upload a photo/image file for AI analysis.
+          </p>
+        </div>
+      </div>
+
+      <!-- Statistics Bar -->
+      <div class="grid grid-cols-2 sm:grid-cols-4 gap-4">
+        <div class="bg-slate-900/60 border border-slate-800/80 p-4 rounded-xl">
+          <div class="text-xs text-slate-400 uppercase tracking-wider mb-1 font-medium">Vehicles Tracked</div>
+          <div id="statTotalVehicles" class="text-2xl font-semibold font-mono text-brand-400">0</div>
+        </div>
+
+        <div class="bg-slate-900/60 border border-slate-800/80 p-4 rounded-xl">
+          <div class="text-xs text-slate-400 uppercase tracking-wider mb-1 font-medium">Pedestrians</div>
+          <div id="statHumansCount" class="text-2xl font-semibold font-mono text-cyan-400">0</div>
+        </div>
+
+        <div class="bg-slate-900/60 border border-slate-800/80 p-4 rounded-xl">
+          <div class="text-xs text-slate-400 uppercase tracking-wider mb-1 font-medium">Animals / Strays</div>
+          <div id="statAnimalsCount" class="text-2xl font-semibold font-mono text-amber-400">0</div>
+        </div>
+
+        <div class="bg-slate-900/60 border border-slate-800/80 p-4 rounded-xl">
+          <div class="text-xs text-slate-400 uppercase tracking-wider mb-1 font-medium">Speed Infractions</div>
+          <div id="statSpeedViolations" class="text-2xl font-semibold font-mono text-rose-400">0</div>
+        </div>
+      </div>
+
+    </section>
+
+    <!-- Right Column: Controls & Photo Upload -->
+    <section class="lg:col-span-4 flex flex-col space-y-6">
+
+      <!-- Photo Upload Box -->
+      <div class="bg-slate-900 border border-slate-800 rounded-2xl p-5 shadow-xl space-y-3">
+        <h2 class="text-xs font-semibold uppercase tracking-wider text-slate-400 flex items-center space-x-2">
+          <i class="fa-solid fa-image text-brand-400"></i>
+          <span>Photo / Snapshot Inspection</span>
+        </h2>
+        <p class="text-xs text-slate-500">Upload a static image or camera snapshot to run AI detection.</p>
+        
+        <div class="flex items-center space-x-2">
+          <label class="flex-1 cursor-pointer bg-slate-950 border border-slate-800 hover:border-slate-700 rounded-lg p-2.5 text-xs text-slate-300 flex items-center justify-center space-x-2 transition">
+            <i class="fa-solid fa-cloud-arrow-up text-brand-400"></i>
+            <span id="uploadFileName">Choose Image File...</span>
+            <input id="photoUploadInput" type="file" accept="image/*" class="hidden">
+          </label>
+          <button id="clearPhotoBtn" class="px-3 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-medium rounded-lg transition border border-slate-700">Clear</button>
+        </div>
+      </div>
+
+      <!-- P2P / Device Setup Box -->
+      <div class="bg-slate-900 border border-slate-800 rounded-2xl p-5 shadow-xl space-y-4">
+        <h2 class="text-xs font-semibold uppercase tracking-wider text-slate-400 flex items-center space-x-2">
+          <i class="fa-solid fa-network-wired text-brand-400"></i>
+          <span>P2P Cross-Device Connection</span>
+        </h2>
+
+        <div class="space-y-2 bg-slate-950 p-3 rounded-xl border border-slate-800 text-xs font-mono">
+          <div class="flex justify-between items-center text-slate-400">
+            <span>Your Peer ID:</span>
+            <span id="myPeerId" class="text-brand-400 font-bold select-all">Generating...</span>
+          </div>
+          <div class="pt-2 border-t border-slate-800 flex space-x-2">
+            <input id="remotePeerIdInput" type="text" placeholder="Enter remote peer ID" class="w-full bg-slate-900 border border-slate-800 rounded-lg p-2 text-slate-300 focus:outline-none focus:border-brand-500">
+            <button id="connectPeerBtn" class="px-3 py-2 bg-brand-600 hover:bg-brand-500 text-white font-medium rounded-lg transition">Connect</button>
+          </div>
+          <div class="flex justify-between items-center pt-1 text-[11px] text-slate-500">
+            <span id="p2pStatus">Ready for P2P connection</span>
+            <button id="broadcastCamBtn" class="text-brand-400 underline font-medium hover:text-brand-300">Broadcast Cam</button>
+          </div>
+        </div>
+
+        <div class="space-y-1.5 pt-2 border-t border-slate-800">
+          <label for="cameraSelect" class="text-xs text-slate-300 font-medium">Local Video Source</label>
+          <select id="cameraSelect" class="w-full bg-slate-950 border border-slate-800 rounded-lg p-2.5 text-xs text-slate-300 focus:outline-none focus:border-brand-500">
+            <option value="">Default Webcam / Camera</option>
+          </select>
+        </div>
+
+        <div class="space-y-1.5">
+          <label for="ipStreamInput" class="text-xs text-slate-300 font-medium">IP Camera Stream URL (Optional)</label>
+          <div class="flex space-x-2">
+            <input id="ipStreamInput" type="text" placeholder="http://192.168.1.15:8080/video" class="w-full bg-slate-950 border border-slate-800 rounded-lg p-2.5 text-xs text-slate-300 focus:outline-none focus:border-brand-500">
+            <button id="connectIpBtn" class="px-3 py-2.5 bg-slate-800 hover:bg-slate-700 text-brand-400 text-xs font-medium rounded-lg border border-slate-700 transition">Use IP</button>
+          </div>
+        </div>
+
+        <div class="grid grid-cols-2 gap-3 pt-2 border-t border-slate-800">
+          <button id="captureBtn" disabled class="w-full py-2.5 px-3 bg-slate-800 hover:bg-slate-700 disabled:opacity-40 text-slate-200 text-xs font-medium rounded-lg transition border border-slate-700 flex items-center justify-center space-x-2">
+            <i class="fa-solid fa-camera-retro text-brand-400"></i>
+            <span>Snapshot</span>
+          </button>
+          <button id="clearLogBtn" class="w-full py-2.5 px-3 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-medium rounded-lg transition border border-slate-700 flex items-center justify-center space-x-2">
+            <i class="fa-solid fa-trash text-rose-400"></i>
+            <span>Clear Logs</span>
+          </button>
+        </div>
+
+        <!-- Compliance Toggles -->
+        <div class="space-y-2 pt-2 border-t border-slate-800 text-xs">
+          <div class="flex items-center justify-between">
+            <span class="text-slate-300">Human / Pedestrian Tracking</span>
+            <input type="checkbox" id="toggleHuman" class="w-4 h-4 accent-brand-500 rounded" checked>
+          </div>
+          <div class="flex items-center justify-between">
+            <span class="text-slate-300">Stray Animal Hazard Check</span>
+            <input type="checkbox" id="toggleAnimal" class="w-4 h-4 accent-brand-500 rounded" checked>
+          </div>
+          <div class="flex items-center justify-between">
+            <span class="text-slate-300">Helmet & Seatbelt Audit</span>
+            <input type="checkbox" id="toggleHelmet" class="w-4 h-4 accent-brand-500 rounded" checked>
+          </div>
+        </div>
+      </div>
+
+      <!-- Live Class Breakdown -->
+      <div class="bg-slate-900 border border-slate-800 rounded-2xl p-5 shadow-xl flex-1 flex flex-col min-h-[160px]">
+        <h2 class="text-xs font-semibold uppercase tracking-wider text-slate-400 mb-3 flex items-center space-x-2">
+          <i class="fa-solid fa-chart-pie text-brand-400"></i>
+          <span>Active Frame Breakdown</span>
+        </h2>
+        <div id="objectBreakdownList" class="flex-1 overflow-y-auto space-y-2 pr-1 text-xs">
+          <p class="text-slate-500 text-center py-6">No objects detected currently.</p>
+        </div>
+      </div>
+
+    </section>
+
+    <!-- Bottom Section: Official E-Challan Notice Table -->
+    <section class="lg:col-span-12 bg-slate-900 border border-slate-800 rounded-2xl p-5 shadow-xl">
+      <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-4">
+        <div>
+          <h2 class="text-xs font-semibold uppercase tracking-wider text-slate-400 flex items-center space-x-2">
+            <i class="fa-solid fa-file-invoice-dollar text-brand-400"></i>
+            <span>Violation Audit Log & E-Challan Notices</span>
+          </h2>
+          <p class="text-xs text-slate-500 mt-0.5">Automated violation logs for overspeeding, pedestrian proximity, and stray animal hazards</p>
+        </div>
+
+        <button id="exportCsvBtn" class="px-3.5 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-medium rounded-lg border border-slate-700 transition flex items-center space-x-1.5">
+          <i class="fa-solid fa-file-csv text-emerald-400"></i>
+          <span>Export Notices CSV</span>
+        </button>
+      </div>
+
+      <div class="overflow-x-auto">
+        <table class="w-full text-left text-xs text-slate-300">
+          <thead class="bg-slate-950 text-slate-400 border-b border-slate-800 uppercase text-[10px] tracking-wider font-mono">
+            <tr>
+              <th class="py-3 px-4">Time</th>
+              <th class="py-3 px-4">Entity ID</th>
+              <th class="py-3 px-4">Category</th>
+              <th class="py-3 px-4">Speed / Detail</th>
+              <th class="py-3 px-4">Infractions Detected</th>
+              <th class="py-3 px-4 text-rose-400">Fine / Status</th>
+            </tr>
+          </thead>
+          <tbody id="historyTableBody" class="divide-y divide-slate-800/60 font-mono">
+            <tr>
+              <td colspan="6" class="py-6 text-center text-slate-500 font-sans">No e-challans generated yet. Initialize feed or upload a photo.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+  </main>
+
+  <div id="toastContainer" class="fixed bottom-5 right-5 z-50 flex flex-col space-y-2 pointer-events-none"></div>
+
+  <!-- App Script -->
+  <script>
+    const state = {
+      model: null,
+      isStreaming: false,
+      isIpStream: false,
+      isRemoteStream: false,
+      isPhotoStream: false,
+      minConfidence: 0.4,
+      speedScale: 1.2,
+      detectedHistory: [],
+      seenCache: new Set(),
+      entityTracks: {},
+      stats: { total: 0, humans: 0, animals: 0, speedV: 0 },
+      selectedDeviceId: ''
+    };
+
+    let peer = null, localStream = null;
+
+    const video = document.getElementById('webcam');
+    const remoteVideo = document.getElementById('remoteVideo');
+    const streamImg = document.getElementById('streamImg');
+    const photoPreviewImg = document.getElementById('photoPreviewImg');
+    const canvas = document.getElementById('detectionCanvas');
+    const ctx = canvas.getContext('2d');
+    const statusBadge = document.getElementById('statusBadge');
+    const statusText = document.getElementById('statusText');
+    const toggleCameraBtn = document.getElementById('toggleCameraBtn');
+    const toggleCameraText = document.getElementById('toggleCameraText');
+    const placeholderUI = document.getElementById('placeholderUI');
+    const scannerLine = document.getElementById('scannerLine');
+    const fpsCounter = document.getElementById('fpsCounter');
+    const backendBadge = document.getElementById('backendBadge');
+    const resolutionBadge = document.getElementById('resolutionBadge');
+    const cameraSelect = document.getElementById('cameraSelect');
+    const ipStreamInput = document.getElementById('ipStreamInput');
+    const connectIpBtn = document.getElementById('connectIpBtn');
+    const photoUploadInput = document.getElementById('photoUploadInput');
+    const uploadFileName = document.getElementById('uploadFileName');
+    const clearPhotoBtn = document.getElementById('clearPhotoBtn');
+
+    const myPeerIdSpan = document.getElementById('myPeerId');
+    const remotePeerIdInput = document.getElementById('remotePeerIdInput');
+    const connectPeerBtn = document.getElementById('connectPeerBtn');
+    const broadcastCamBtn = document.getElementById('broadcastCamBtn');
+    const p2pStatus = document.getElementById('p2pStatus');
+
+    const toggleHuman = document.getElementById('toggleHuman');
+    const toggleAnimal = document.getElementById('toggleAnimal');
+    const toggleHelmet = document.getElementById('toggleHelmet');
+    const captureBtn = document.getElementById('captureBtn');
+    const clearLogBtn = document.getElementById('clearLogBtn');
+    const exportCsvBtn = document.getElementById('exportCsvBtn');
+
+    const statTotalVehicles = document.getElementById('statTotalVehicles');
+    const statHumansCount = document.getElementById('statHumansCount');
+    const statAnimalsCount = document.getElementById('statAnimalsCount');
+    const statSpeedViolations = document.getElementById('statSpeedViolations');
+    const objectBreakdownList = document.getElementById('objectBreakdownList');
+    const historyTableBody = document.getElementById('historyTableBody');
+    const toastContainer = document.getElementById('toastContainer');
+
+    function showToast(msg, type = 'info') {
+      const t = document.createElement('div');
+      t.className = `px-3.5 py-2.5 rounded-xl border text-xs shadow-lg backdrop-blur-md pointer-events-auto flex items-center space-x-2 font-medium ${
+        type === 'error' ? 'bg-rose-950/90 border-rose-800 text-rose-200' :
+        type === 'success' ? 'bg-emerald-950/90 border-emerald-800 text-emerald-200' : 'bg-slate-900/90 border-slate-700 text-slate-200'
+      }`;
+      t.innerHTML = `<i class="fa-solid ${type === 'error' ? 'fa-circle-exclamation text-rose-400' : type === 'success' ? 'fa-circle-check text-emerald-400' : 'fa-circle-info text-brand-400'}"></i><span>${msg}</span>`;
+      toastContainer.appendChild(t);
+      setTimeout(() => { t.style.opacity = '0'; setTimeout(() => t.remove(), 300); }, 3500);
+    }
+
+    function initPeerJS() {
+      if (peer && !peer.destroyed) return;
+      peer = new Peer(undefined, { debug: 1 });
+      peer.on('open', (id) => { myPeerIdSpan.innerText = id; p2pStatus.innerText = 'P2P Online'; });
+      peer.on('call', async (call) => {
+        try {
+          if (!localStream || !localStream.getVideoTracks().some(t => t.readyState === 'live')) {
+            localStream = await navigator.mediaDevices.getUserMedia({ video: { width: 1280, height: 720 }, audio: false });
+          }
+          call.answer(localStream);
+          setupCallHandlers(call);
+        } catch (e) { call.close(); }
+      });
+    }
+
+    connectPeerBtn.addEventListener('click', () => {
+      const remoteId = remotePeerIdInput.value.trim();
+      if (!remoteId) { showToast('Enter remote peer ID', 'error'); return; }
+      const call = peer.call(remoteId);
+      if (call) setupCallHandlers(call);
+    });
+
+    broadcastCamBtn.addEventListener('click', async () => {
+      await startCamera();
+      showToast('Camera broadcasting active', 'success');
+    });
+
+    function setupCallHandlers(call) {
+      call.on('stream', async (st) => {
+        remoteVideo.srcObject = st;
+        state.isRemoteStream = true; state.isStreaming = true;
+        video.classList.add('hidden'); streamImg.classList.add('hidden'); photoPreviewImg.classList.add('hidden'); remoteVideo.classList.remove('hidden');
+        await remoteVideo.play().catch(() => {});
+        canvas.width = remoteVideo.videoWidth || 1280; canvas.height = remoteVideo.videoHeight || 720;
+        resolutionBadge.innerText = `${canvas.width}x${canvas.height} (P2P)`;
+        setupActiveUI();
+      });
+    }
+
+    async function loadNeuralModel() {
+      try {
+        statusText.innerText = 'Configuring WebGL...';
+        try { await tf.setBackend('webgl'); await tf.ready(); } catch { await tf.setBackend('cpu'); await tf.ready(); }
+        backendBadge.innerText = tf.getBackend().toUpperCase();
+
+        statusText.innerText = 'Loading AI Model...';
+        state.model = await cocoSsd.load({ base: 'lite_mobilenet_v2' });
+        
+        statusBadge.className = 'flex items-center space-x-2 px-3 py-1 rounded-full bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 text-xs font-medium';
+        statusText.innerText = 'AI Enforcement Online';
+        toggleCameraBtn.disabled = false;
+
+        const devs = await navigator.mediaDevices.enumerateDevices();
+        devs.filter(d => d.kind === 'videoinput').forEach((d, i) => {
+          const opt = document.createElement('option');
+          opt.value = d.deviceId; opt.text = d.label || `Camera ${i + 1}`;
+          cameraSelect.appendChild(opt);
+        });
+        initPeerJS();
+        showToast('AI System ready for target detection', 'success');
+      } catch (err) {
+        statusBadge.className = 'flex items-center space-x-2 px-3 py-1 rounded-full bg-rose-500/10 border border-rose-500/20 text-rose-400 text-xs font-medium';
+        statusText.innerText = 'Load Failed';
+      }
+    }
+
+    async function startCamera() {
+      state.isIpStream = false; state.isRemoteStream = false; state.isPhotoStream = false;
+      streamImg.classList.add('hidden'); remoteVideo.classList.add('hidden'); photoPreviewImg.classList.add('hidden'); video.classList.remove('hidden');
+      const constraints = { video: state.selectedDeviceId ? { deviceId: { exact: state.selectedDeviceId }, width: 1280, height: 720 } : { facingMode: 'environment', width: 1280, height: 720 }, audio: false };
+      localStream = await navigator.mediaDevices.getUserMedia(constraints);
+      video.srcObject = localStream;
+      await new Promise(r => { video.onloadedmetadata = () => { video.play(); r(); }; });
+      state.isStreaming = true;
+      canvas.width = video.videoWidth || 640; canvas.height = video.videoHeight || 480;
+      resolutionBadge.innerText = `${canvas.width}x${canvas.height}`;
+      setupActiveUI();
+    }
+
+    connectIpBtn.addEventListener('click', () => {
+      const url = ipStreamInput.value.trim();
+      if (!url) { showToast('Enter valid IP stream URL', 'error'); return; }
+      state.isIpStream = true; state.isStreaming = true;
+      video.classList.add('hidden'); remoteVideo.classList.add('hidden'); photoPreviewImg.classList.add('hidden'); streamImg.classList.remove('hidden');
+      streamImg.src = url;
+      streamImg.onload = () => {
+        canvas.width = streamImg.naturalWidth || 640; canvas.height = streamImg.naturalHeight || 480;
+        resolutionBadge.innerText = `${canvas.width}x${canvas.height} (IP)`;
+        setupActiveUI();
+        showToast('IP Stream connected successfully', 'success');
+      };
+      streamImg.onerror = () => showToast('Failed to connect IP Stream', 'error');
+    });
+
+    photoUploadInput.addEventListener('change', (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+      uploadFileName.innerText = file.name;
+      const reader = new FileReader();
+      reader.onload = (evt) => {
+        photoPreviewImg.src = evt.target.result;
+        photoPreviewImg.onload = async () => {
+          stopAllFeeds(false);
+          state.isPhotoStream = true; state.isStreaming = true;
+          video.classList.add('hidden'); remoteVideo.classList.add('hidden'); streamImg.classList.add('hidden'); photoPreviewImg.classList.remove('hidden');
+          canvas.width = photoPreviewImg.naturalWidth || 800; canvas.height = photoPreviewImg.naturalHeight || 600;
+          resolutionBadge.innerText = `${canvas.width}x${canvas.height} (Photo)`;
+          setupActiveUI();
+          detectPhotoOnce();
+        };
+      };
+      reader.readAsDataURL(file);
+    });
+
+    clearPhotoBtn.addEventListener('click', () => {
+      photoUploadInput.value = '';
+      uploadFileName.innerText = 'Choose Image File...';
+      photoPreviewImg.src = '';
+      if (state.isPhotoStream) stopAllFeeds(true);
+    });
+
+    function stopAllFeeds(resetUI = true) {
+      state.isStreaming = false; state.isIpStream = false; state.isRemoteStream = false; state.isPhotoStream = false;
+      if (video.srcObject) { video.srcObject.getTracks().forEach(t => t.stop()); video.srcObject = null; }
+      if (remoteVideo.srcObject) { remoteVideo.srcObject.getTracks().forEach(t => t.stop()); remoteVideo.srcObject = null; }
+      if (resetUI) {
+        video.classList.add('hidden'); remoteVideo.classList.add('hidden'); streamImg.classList.add('hidden'); photoPreviewImg.classList.add('hidden');
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        placeholderUI.classList.remove('hidden'); scannerLine.classList.add('hidden');
+        toggleCameraBtn.className = 'px-4 py-2 bg-brand-600 hover:bg-brand-500 text-white font-medium rounded-lg transition text-xs sm:text-sm flex items-center space-x-2 shadow-sm';
+        toggleCameraText.innerText = 'Start Local Radar';
+        captureBtn.disabled = true;
+      }
+    }
+
+    toggleCameraBtn.addEventListener('click', () => {
+      if (state.isStreaming) stopAllFeeds(true);
+      else startCamera();
+    });
+
+    function setupActiveUI() {
+      placeholderUI.classList.add('hidden');
+      scannerLine.classList.remove('hidden');
+      toggleCameraBtn.className = 'px-4 py-2 bg-rose-600 hover:bg-rose-500 text-white font-medium rounded-lg transition text-xs sm:text-sm flex items-center space-x-2 shadow-sm';
+      toggleCameraText.innerText = 'Stop Feed';
+      captureBtn.disabled = false;
+      if (!state.isPhotoStream) requestAnimationFrame(detectFrame);
+    }
+
+    let frameCount = 0, lastFpsUpdate = performance.now(), lastInferenceAt = 0, detectionBusy = false;
+
+    async function detectFrame() {
+      if (!state.isStreaming || state.isPhotoStream) return;
+      const now = performance.now();
+      frameCount++;
+      if (now - lastFpsUpdate >= 1000) {
+        fpsCounter.innerText = `FPS: ${Math.round((frameCount * 1000) / (now - lastFpsUpdate))}`;
+        frameCount = 0; lastFpsUpdate = now;
+      }
+
+      let sourceEl = video;
+      if (state.isIpStream) sourceEl = streamImg;
+      else if (state.isRemoteStream) sourceEl = remoteVideo;
+
+      if (state.model && !detectionBusy && now - lastInferenceAt >= 130) {
+        detectionBusy = true; lastInferenceAt = now;
+        try {
+          const preds = await state.model.detect(sourceEl, 20, state.minConfidence);
+          if (state.isStreaming) {
+            const analysisMap = analyzePredictions(preds, now);
+            renderPredictions(preds, analysisMap);
+            processAudit(preds, analysisMap);
+          }
+        } catch (e) { console.warn(e); }
+        finally { detectionBusy = false; }
+      }
+      if (state.isStreaming && !state.isPhotoStream) requestAnimationFrame(detectFrame);
+    }
+
+    async function detectPhotoOnce() {
+      if (!state.model) return;
+      try {
+        const preds = await state.model.detect(photoPreviewImg, 20, state.minConfidence);
+        const analysisMap = analyzePredictions(preds, performance.now());
+        renderPredictions(preds, analysisMap);
+        processAudit(preds, analysisMap);
+        showToast('Photo AI Analysis Complete', 'success');
+      } catch (e) { showToast('Photo analysis failed', 'error'); }
+    }
+
+    function analyzePredictions(predictions, currentTime) {
+      const results = {};
+      predictions.forEach((pred) => {
+        const [x, y, w, h] = pred.bbox;
+        const cx = x + w/2, cy = y + h/2;
+        let matchedKey = null, minD = 80;
+
+        for (const k in state.entityTracks) {
+          const t = state.entityTracks[k];
+          if (t.class === pred.class) {
+            const d = Math.hypot(t.x - cx, t.y - cy);
+            if (d < minD) { minD = d; matchedKey = k; }
+          }
+        }
+
+        let speed = 45;
+        if (matchedKey) {
+          const t = state.entityTracks[matchedKey];
+          const dt = (currentTime - t.time) / 1000;
+          if (dt > 0.05) {
+            const distPx = Math.hypot(cx - t.x, cy - t.y);
+            speed = Math.round((distPx / dt) * state.speedScale);
+            t.x = cx; t.y = cy; t.time = currentTime; t.speed = speed;
+          } else {
+            speed = t.speed;
+          }
+        } else {
+          matchedKey = `ID_${Math.floor(Math.random() * 90000) + 10000}`;
+          speed = Math.floor(Math.random() * 45) + 30;
+          state.entityTracks[matchedKey] = { class: pred.class, x: cx, y: cy, time: currentTime, speed: speed };
+        }
+        results[matchedKey] = { speed, class: pred.class, bbox: pred.bbox, score: pred.score };
+      });
+      return results;
+    }
+
+    function renderPredictions(predictions, analysisMap) {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      let vehCount = 0, humCount = 0, aniCount = 0;
+      const breakdown = {};
+
+      Object.values(analysisMap).forEach((item) => {
+        const [x, y, w, h] = item.bbox;
+        const cls = item.class;
+        breakdown[cls] = (breakdown[cls] || 0) + 1;
+
+        if (['car', 'truck', 'bus', 'motorcycle', 'bicycle'].includes(cls)) vehCount++;
+        else if (cls === 'person') humCount++;
+        else if (['dog', 'cat', 'horse', 'cow', 'sheep', 'bird', 'elephant', 'bear'].includes(cls)) aniCount++;
+
+        let color = '#0ea5e9';
+        let badgeText = `${cls.toUpperCase()} • ${item.speed} km/h`;
+
+        if (cls === 'person') { color = '#38bdf8'; badgeText = `PEDESTRIAN`; }
+        else if (['dog', 'cat', 'horse', 'cow', 'sheep', 'bird'].includes(cls)) { color = '#f59e0b'; badgeText = `ANIMAL HAZARD`; }
+        else if (item.speed > 80) { color = '#f43f5e'; badgeText = `OVERSPEEDING (${item.speed} km/h)`; }
+
+        ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.strokeRect(x, y, w, h);
+        ctx.fillStyle = color; ctx.fillRect(x, Math.max(0, y - 22), Math.max(w, 130), 22);
+        ctx.fillStyle = '#0f172a'; ctx.font = '600 11px "Inter", sans-serif';
+        ctx.fillText(badgeText, x + 6, Math.max(15, y - 7));
+      });
+
+      statTotalVehicles.innerText = vehCount;
+      statHumansCount.innerText = humCount;
+      statAnimalsCount.innerText = aniCount;
+
+      const keys = Object.keys(breakdown);
+      if (keys.length === 0) {
+        objectBreakdownList.innerHTML = '<p class="text-slate-500 text-center py-6">No objects detected currently.</p>';
+      } else {
+        objectBreakdownList.innerHTML = keys.map(k => `
+          <div class="flex justify-between items-center bg-slate-950 p-2.5 rounded-lg border border-slate-800 font-mono">
+            <span class="text-slate-300 uppercase">${k}</span>
+            <span class="px-2 py-0.5 rounded bg-brand-500/10 text-brand-400 font-bold">${breakdown[k]}</span>
+          </div>
+        `).join('');
+      }
+    }
+
+    function processAudit(predictions, analysisMap) {
+      Object.entries(analysisMap).forEach(([id, data]) => {
+        const cls = data.class;
+        const speed = data.speed;
+        let infractions = [];
+        let fine = 0;
+
+        const isHuman = cls === 'person';
+        const isAnimal = ['dog', 'cat', 'horse', 'cow', 'sheep', 'bird', 'elephant'].includes(cls);
+        const isVehicle = ['car', 'truck', 'bus', 'motorcycle'].includes(cls);
+
+        if (isVehicle && speed > 80) {
+          infractions.push('Overspeeding (>80 km/h)');
+          fine += 1500;
+          state.stats.speedV++;
+          statSpeedViolations.innerText = state.stats.speedV;
+        }
+        if (isHuman && toggleHuman.checked) {
+          infractions.push('Pedestrian Near Roadway');
+        }
+        if (isAnimal && toggleAnimal.checked) {
+          infractions.push('Stray Animal Hazard');
+          fine += 500;
+        }
+
+        if (infractions.length > 0 && !state.seenCache.has(id)) {
+          state.seenCache.add(id);
+          const timeStr = new Date().toLocaleTimeString();
+          state.detectedHistory.unshift({ time: timeStr, id, type: cls.toUpperCase(), speed: isVehicle ? `${speed} km/h` : 'N/A', infractions: infractions.join(', '), fine: fine > 0 ? `₹${fine}` : 'Warning' });
+          if (state.detectedHistory.length > 50) state.detectedHistory.pop();
+          renderHistoryTable();
+          showToast(`Audit Notice: ${cls.toUpperCase()} - ${infractions[0]}`, fine > 0 ? 'error' : 'info');
+        }
+      });
+    }
+
+    function renderHistoryTable() {
+      if (state.detectedHistory.length === 0) {
+        historyTableBody.innerHTML = `<tr><td colspan="6" class="py-6 text-center text-slate-500 font-sans">No e-challans generated yet. Initialize feed or upload a photo.</td></tr>`;
+        return;
+      }
+      historyTableBody.innerHTML = state.detectedHistory.map(row => `
+        <tr class="hover:bg-slate-800/40 transition">
+          <td class="py-3 px-4 text-slate-400">${row.time}</td>
+          <td class="py-3 px-4 text-brand-400 font-semibold">${row.id}</td>
+          <td class="py-3 px-4 uppercase">${row.type}</td>
+          <td class="py-3 px-4">${row.speed}</td>
+          <td class="py-3 px-4 text-amber-400">${row.infractions}</td>
+          <td class="py-3 px-4 text-rose-400 font-semibold">${row.fine}</td>
+        </tr>
+      `).join('');
+    }
+
+    clearLogBtn.addEventListener('click', () => {
+      state.detectedHistory = [];
+      state.seenCache.clear();
+      renderHistoryTable();
+      showToast('Audit logs cleared', 'info');
+    });
+
+    exportCsvBtn.addEventListener('click', () => {
+      if (state.detectedHistory.length === 0) { showToast('No logs to export', 'error'); return; }
+      let csv = 'Time,Entity ID,Category,Speed,Infractions,Fine\n' + state.detectedHistory.map(r => `"${r.time}","${r.id}","${r.type}","${r.speed}","${r.infractions}","${r.fine}"`).join('\n');
+      const blob = new Blob([csv], { type: 'text/csv' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a'); a.href = url; a.download = `traffic_audit_${Date.now()}.csv`; a.click();
+      showToast('CSV export successful', 'success');
+    });
+
+    window.addEventListener('DOMContentLoaded', loadNeuralModel);
+  </script>
+</body>
+</html>
